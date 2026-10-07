@@ -1,0 +1,691 @@
+---
+title: "Individual Project 2"
+author: "Olivia Harper"
+date: "2025-12-06"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+Research Hypothesis: 
+Do location characteristics (city,crime cases, legal reports) impact house
+price in the UK?
+
+Data: Global House Purchase Decision Dataset
+Variables: 
+  Response: Price
+  Explanatory: Crime Cases Reported, Legal Cases on Property
+  
+Crime Cases Reported: Crime reports near property
+Legal Cases on Property: Legal disputes (yes, no)
+Interaction: City (Birmingham (0), Liverpool (1), London (2), Manchester(3))
+  
+Idea: St up exploratory plots of the variables used. Fit a model with the above variables. Run diagnostics on them to check for linearity, normality, outliers,non-constant variance, and multicollinearity. Perform any remedial methods beforecreating the final model and test. 
+
+Notes: Steps 1 - 12 pertain to my individual model. Steps 13 - 19 pertain to analysis on the full model not including initial fit and model selection. 
+
+STEP 1: INSTALLING PACKAGES AND LIBRARIES 
+```{r}
+ install.packages("lmtest", repos = "https://cran.rstudio.com/")
+library(dplyr)
+library(tidyr)
+library(car)
+library(ggplot2)
+library(lmtest)
+library(MASS)
+library(glmnet)
+```
+STEP 2:   IMPORTING THE DATASET AND SUBSETTING DATASET
+```{r}
+data <- read.csv("~/STAT512/global_house_purchase_dataset.csv") 
+data_uk <- data |> 
+  filter(country == "UK") #creating a new dataset for rows only pertaining to the UK
+df <- data_uk[0:500,] #Taking the first 500 samples, becuase the dataset is over 15000
+```
+STEP 3: DESCRIPTIVE STATISTICS, EXPLORATORY PLOTS, EARLY PATTERNS AND CONCERN
+Summary: Price shows a highly uniform histogram, but was one of the few continuous variables to choose from. Crime ended up being more categorical with the highest number reported being 4. Legal cases is binary, about 3:1 ratio (0:1)
+#PRICE
+```{r}
+#PRICE
+summary(df$price) #Preliminary look at the variable trends (summary for continuous)
+#Histogram of Price
+hist(df$price,
+     main = "Histogram of UK House Prices",
+     xlab = "Price",
+     ylab = "Frequency",
+     border = "black")
+ 
+```
+#CRIME CASES REPORTED
+```{r}
+summary(df$crime_cases_reported) #Prelim look at the variable trends
+
+#Histogram of Crime Cases Reported
+hist(df$crime_cases_reported,
+     main = "Histogram of UK Crime Cases Reported",
+     xlab = "Crime Cases Reported",
+     ylab = "Frequency",
+     border = "black")
+
+#Scatterplot: Price vs. Crime Cases Reported
+ggplot(df, aes(x = crime_cases_reported, y = price)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Price vs. Crime Cases Reported",
+       x = "X",
+       y = "Y") +
+  theme_classic()
+```
+#LEGAL CASES REPORTED ON PROPERTY
+```{r}
+table(df$legal_cases_on_property) #Prelim look at trends (table for categorical)
+#Histogram of Legal Cases
+hist(df$legal_cases_on_property,
+     main = "Histogram of UK Legal Cases on Property",
+     xlab = "Legal Cases",
+     ylab = "Frequency",
+     border = "black")
+
+#Scatterplot: Price vs. Legal Cases on Property
+ggplot(df, aes(x = legal_cases_on_property, y = price)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Price vs. Legal Cases on Property",
+       x = "X",
+       y = "Y") +
+  theme_classic()
+```
+STEP 4: FIT INITIAL MODEL
+The initial model only shows the intercept as being significant, which is to be expected considering the cities themselves are very similar. Crime and Legal cases have concerning VIF values, but the interaction terms show severe multicollinearity, also likely for the above reason. 
+```{r}
+base_fit <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df) #Fitting base model with city as the interaction term
+summary(base_fit)
+
+#Check for multicollinearity
+vif(base_fit) #concerning and severe multicollinearity
+```
+STEP 5: MODEL DIAGNOSTICS
+Summary: The QQ-Plot shows pretty significant deviation in the tails and potential outliers, but is relatively symmetrical. The scatterplot of residuals vs. fitted looks different since our two variables are categorical. No obvious curvature. Potential heteroscedasticity, but the Breusch- Pagan test has a non-significant p-value, so the cone shape is due to how the individual variables are distributed (see step 2). The histogram doesn't look skewed, but also doesn't look normal (similar structure to the price histogram), and our Shapiro test has a significant p-value so we do have a normality issue. 
+```{r}
+res_base <- resid(base_fit)
+fitted_base <- fitted(base_fit)
+
+#Residual QQ Plot
+qqnorm(res_base, main = "Normal Q-Q Plot", xlab = "Residuals", ylab = "Sample Quantiles")
+qqline(res_base, col = "blue", lwd = 2)
+
+#Residual Plot
+plot(fitted_base, res_base)
+
+#Histogram of Residuals (to check for normality, heteroscedasticity, non-linearity, and outliers)
+hist(res_base,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+
+shapiro.test(res_base) #Significant - non-normal
+bptest(base_fit) #Not significant - has constant variance
+```
+STEP 6: CHECK FOR OUTLIERS 
+Since we had a normality issue we want to check for influential points and potential outliers. The influence plot flags 5 values as possible influential points. And theleverage plot show multiple potential outliers as well as multiple based ont he Cook's D cut value. Based on that we will try removing outliers to see how that will effect the model. 
+```{r}
+n <- nobs(base_fit)
+p <- length(coef(base_fit))           # includes the intercept
+lev <- hatvalues(base_fit) #Leverage
+D <- cooks.distance(base_fit) #Cook's Distance
+rstud <- rstudent(base_fit) #Student's Residuals
+
+cook_cut <- 4/n #Leverage cut-off value
+lev_cut  <- 2*p/n #Cook cut-off value
+mean_lev <- mean(lev)
+plot_outliers <- lev[lev > 2 * mean_lev]
+
+influencePlot(base_fit, 
+              scale = 1,
+              fill = FALSE,
+              #col = c("black", "red"),
+              id.method = "noteworthy",
+              grid = TRUE, 
+              main = "Influence Plot")
+abline(v = lev_cut, lty = 2)
+dev.off #Influence plot flags 5 points
+
+#Summary of Potential Influential Points
+summary_influence <- data.frame(
+  id = seq_len(n),
+  fitted = fitted(base_fit),
+  rstud = rstud,
+  leverage = lev,
+  cooksD = D,
+  flag_cook = D > cook_cut,
+  flag_lev  = lev > lev_cut,
+  flag_big_resid = abs(rstud) > 3
+) 
+
+#Points to inspect
+head(summary_influence[ order(-summary_influence$cooksD), ], 10) #First 10 influential points by Cook's estimate
+
+#Cook's Distance Plot
+par(mfrow = c(1,2))
+plot(D, type="h", main="Cook's Distance", ylab="D", xlab="Obs")
+abline(lev=cook_cut, lty=2)
+
+#Leverage Plot
+plot(lev, ylab="Leverage", main="Leverage (hat values)")
+abline(lev=lev_cut, lty=2)
+par(mfrow=c(1,1))
+```
+STEP 7: REMOVE OUTLIERS
+After the previous diagnostic we decided to remove outliers from the dataset if they are outside the 1.5*IQR range. After fitting a new model with the cleaned dataset we found this removed almost all of the observations where legal_cases_on_property = 1. So because that removed a significant portion of our model, we decided to stay with the original dataset despite there being some outliers and influential points. 
+```{r}
+remove_outliers <- function(df) {
+  df %>%
+    mutate(across(where(is.numeric),
+                ~ ifelse(.x < quantile(.x, 0.25, na.rm = TRUE) - 1.5 * IQR(.x) |
+                           .x > quantile(.x, 0.75, na.rm = TRUE) + 1.5 * IQR(.x),
+                         NA, .x)))
+}
+
+df_clean <- remove_outliers(df) |> 
+  drop_na()
+
+#Fit a new model with cleaned dataframe
+clean_fit <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df_clean)
+
+summary(clean_fit)
+
+res_clean <- resid(clean_fit)
+fitted_clean <- fitted(clean_fit)
+
+#Residual QQ Plot
+qqnorm(res_clean, main = "Normal Q-Q Plot", xlab = "Residuals", ylab = "Sample Quantiles")
+qqline(res_clean, col = "blue", lwd = 2)
+
+#Residual Plot
+plot(fitted_clean, res_clean)
+
+#Histogram of Residuals
+hist(res_clean,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+#Diagnostics
+shapiro.test(res_clean)
+bptest(clean_fit)
+# vif(clean_fit)
+#Removing Outliers removed all 1's coded for Legal Cases On Property, so we choose to exclude removing outliers
+```
+STEP 8: WLS REGRESSION
+To combat the normality issue we ran a WLS regression. After fitting the model, Shapiro and BP tests came back ever so slightly improved from the original model, but due to time constraints we continued to bootstrapping for interpretation. 
+```{r}
+#Assign weights
+ols_model <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df)
+weights <- 1 / fitted(ols_model)^2
+
+#WLS Model
+wls_model <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df, weights = weights)
+summary(wls_model)
+
+#Shapiro-Wilk
+shapiro.test(resid(ols_model))
+shapiro.test(resid(wls_model))
+#Breusch-Pagan
+bptest(ols_model) 
+bptest(wls_model)
+
+#Check Residual Plots after WLS Correction
+res_wls <- resid(wls_model)
+fitted_wls <- fitted(wls_model)
+#Scatterplot of Residuals vs. Fitted
+plot(fitted_wls, res_wls)
+#Histogram of Residuals
+hist(res_wls,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+```
+STEP 9: BOOTSTRAPPING
+In this section (Step 9 and Step 9 Cont.) we perform t-based confidence intervals and bootstrapped confidence intervals for both the ols and wls model to determine impact on normality. We found that in comparing the t-based CIs and bootstrapped CIs, they were very similar. The bootstrapped CIs appeared slightly narrower, but significance remained the same. Thus it would seem that WLS did little to fix the normality issue, but it was necessary to try.  Time contraints limited from performing a robust regression model. 
+```{r}
+set.seed(321)
+#Code taken from lecture notes Topic 21 WLS
+#Build design matrix
+X <- model.matrix(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df)
+B <- 1000
+n<- nrow(df)
+#OLS Bootstrapping
+boot_beta_ols <- matrix(NA_real_, nrow = B, ncol = length(coef(ols_model)))
+for (b in 1:B) {
+  idx <- sample.int(n, n, replace = TRUE)
+  fb <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df[idx,])
+  boot_beta_ols[b, ] <- as.numeric(coef(fb)) 
+}
+ci_ols_boot <- t(apply(boot_beta_ols, 2, quantile, probs = c(0.025, 0.975)))
+#WLS Bootstrapping
+p <- length(coef(wls_model))
+boot_b_wls <- matrix(NA_real_, nrow = B, ncol = p)
+matrix(coef(wls_model), ncol = 1)
+
+for (b in 1:B) {
+  idx <- sample.int(n, size = n, replace = TRUE)
+  dat_b <- df[idx, ]
+  ols_b <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = dat_b) #ols model on bootstrapped sample
+  w_b <- 1 / fitted(ols_b)^2 #compute weights
+  wls_b <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = dat_b, weights = w_b)
+  boot_b_wls[b, ] <- as.numeric(coef(wls_b)) #pull all coefficients  
+} 
+  ci_wls_boot <- t(apply(boot_b_wls, 2, quantile, probs = c(0.025, 0.975)))
+```
+STEP 9: CONT.
+```{r}
+#OLS t-based CI
+est_ols <- matrix(coef(ols_model), ncol = 1)
+err_ols <- matrix(summary(ols_model)$coefficients[, c("Std. Error")])
+nu_ols <- df.residual(ols_model)
+tcrit_ols <- qt(0.975, df = nu_ols)
+ci_ols_t_upper <- est_ols + tcrit_ols * err_ols
+ci_ols_t_lower <- est_ols - tcrit_ols *err_ols
+ci_ols_t <- cbind(ci_ols_t_lower, ci_ols_t_upper)
+
+#WLS t-based CI
+est_wls <- matrix(coef(wls_model), ncol = 1)
+err_wls <- matrix(summary(wls_model)$coefficients[, c("Std. Error")])
+nu_wls <- df.residual(wls_model)
+tcrit_wls <- qt(0.975, df = nu_ols)
+ci_wls_t_upper <- est_wls + tcrit_wls * err_wls
+ci_wls_t_lower <- est_wls - tcrit_wls *err_wls
+ci_wls_t <- cbind(ci_wls_t_lower, ci_wls_t_upper)
+
+#WLS Confidence Interval Table with t-based and bootstrapped CIs
+ols_tab <- data.frame(
+  Term <- colnames(X),#colnames( boot_b),
+  Beta_hat = coef(ols_model),
+  CI2.5_t <- ci_ols_t[,1],
+  CI97.5_t <- ci_ols_t[,2],
+  CI2.5 <-  ci_ols_boot[,1],
+  CI97.5 <- ci_ols_boot[,2],
+  row.names = NULL
+)
+ols_tab
+#WLS Confidence Interval Table with t-based and bootstrapped CIs
+wls_tab <- data.frame(
+  Term <- colnames(X),#colnames( boot_b),
+  Beta_hat = coef(wls_model),
+  CI2.5_t <- ci_wls_t[,1],
+  CI97.5_t <- ci_wls_t[,2],
+  CI2.5 <-  ci_wls_boot[,1],
+  CI97.5 <- ci_wls_boot[,2],
+  row.names = NULL
+)
+wls_tab
+```
+STEP 10: RIDGE REGRESSION
+Lastly to address multicollinerity concens we performed ridge regression which inflates the diagonal by lambda. Results are presented in the next step. 
+```{r}
+X_w <- model.matrix(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df, weights = weights)
+vif(wls_model)
+#Code taken from lecture notes Topic 21 Ridge Regression
+#10-fold cross validations
+cv_ridge <- cv.glmnet(X_w, df$price, alpha =0)
+
+lambda_min <- cv_ridge$lambda.min
+cat("\n --- Lambda Min --- \n")
+lambda_min #find the lambda that minimizes cross-val. error
+
+ridge_fit <- glmnet(X_w, df$price, alpha = 0)
+plot(ridge_fit, xvar = "lambda", label = TRUE)
+
+cat("\n --- Ridge Coefficients --- \n")
+beta <- coef(ridge_fit, s = lambda_min)[-2] #Take beta coefficients corresponding to the lambda min value
+#excluding the second entry
+```
+STEP 11: RIDGE REGRESSION BOOTSTRAPPING
+Results from the bootstrapped confidence intervals showed very similar to the WLS regression. Again only the intercept has a significant confidence interval, and the intervals overall seem to overlap still indicating collinearity. So that indicates that impacts may not be statistically significant. 
+```{r}
+set.seed(321)
+#Code taken from lecture notes Topic 21 Ridge Regression
+B <- 1000
+p <- ncol(X_w)
+boot_b <- matrix(NA_real_, nrow = B, ncol = p)
+colnames(boot_b) <- colnames(X_w)
+
+n <- nrow(X_w)
+for (b in 1:B) {
+  idx <- sample.int(n, size = n, replace = TRUE)
+  fit_b <- glmnet(X_w[idx, ], df$price[idx], alpha = 0,
+                  lambda = lambda_min, standardize = FALSE)
+  boot_b[b, ] <- as.numeric(coef(fit_b))[-2]
+}
+ci_coef <- t(apply(boot_b, 2, quantile, probs = c(0.025, 0.975)))
+#Ridge Regression table with confidence intervals
+ridge_tab <- data.frame(
+  Term = colnames(boot_b), 
+  Beta_hat = beta,  
+  CI2.5 = ci_coef[, 1],
+  CI97.5 = ci_coef[,2],
+  row.names = NULL
+)
+cat("\n --- Ridge Regression Table --- \n"); ridge_tab
+```
+STEP 12: HYPOTHESIS TEST
+Lastly for the individual portion of the project, I ran an anova test test our hypothesis: whether there were any overall regional effects. The full model contains everything with the interaction terms and factor(city), while the reduced models consider those betas equal to 0. After running it we get a p-value > 0.05 so e fail to reject the null hypothesis and conclude that there do not appear to by any overall regional effects. Intuitively this makes sense since Birmingham, London, Liverpool, and Manchester are all very similar cities. They are all about the same size, people will have the same socieoeconomic status, economies will be about the same, and thus crime would be about the same. So while it woud be plausible to assume that city would affect price, in this case, with the data in this dataset, it makes sense that no significant regional effects would be found. 
+```{r}
+full_model <- lm(price ~ crime_cases_reported + legal_cases_on_property + crime_cases_reported * factor(city) + legal_cases_on_property*factor(city), data = df, weights = weights)
+
+reduced_model <- lm(price ~ crime_cases_reported + legal_cases_on_property, data = df, weights = weights)
+
+anova(reduced_model, full_model)
+```
+STEP 13: COMBINED MODEL
+For this mode, another group memeber performed model selection strategies and the following predictors were chosen for the full model: property size, satisfaction score, EMI to income ratio, and city which we used as an interaction term. Since exploratory plots were already generated in other models, we jumped right into fitting a model. Similar to almost all of the other individual models we chose, we found non-normality, little evidence for heterscedasticity, and medium/high multicollinearity, so diagnostics and remedies will look similar to the model on location characteristics. 
+```{r}
+# How do city level differences shape the impact of property size, emi to income 
+# ratio and satisfaction score on housing prices?
+Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df)
+summary(Model)
+#Diagnostics
+res_Model <- resid(Model)
+fitted_Model <- fitted(Model)
+#Scatterplot of Residuals vs. Fitted
+plot(fitted_Model, res_Model,
+     xlab = "Fitted Values", 
+     ylab = "Residuals", 
+     main = "Residuals vs. Fitted")
+
+#Histogram of Residuals
+hist(res_Model,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+#QQ Plot of Residuals
+qqnorm(res_Model, main = "Normal Q-Q Plot", xlab = "Residuals", ylab = "Sample Quantiles")
+qqline(res_Model, col = "blue", lwd = 2)
+
+#multicollinearity (VIF)
+vif(Model) 
+#normality (Shapiro Test)
+shapiro.test(res_Model)
+#heteroscedasticity (Breusch-Pagan Test)
+bptest(Model)
+# Diagnostic tests: 
+#   property size is significant as well as satisfaction score and property size and manchester
+#   Residuals are not normal. But no heterscedasticity and no quadratic pattern. 
+#   Multicollinearity: all are concerning or severe except emi to income ratio
+```
+STEP 14: OUTLIERS
+Since we had non-normality we assessed outliers and influential points. Again Cook'd D cutoff flagged a good amount of points as well as the leverage graph and influence plot. So, we tried removing outliers. This time the Shapiro p-value increased enough to justify using the cleaned dataset moving forward. 
+```{r}
+#Identifying Outliers and Influential Points
+#diagnostics
+lev_h <- hatvalues(Model)
+t_stud <- rstudent(Model)
+cookD <- cooks.distance(Model)
+
+n <- nrow(df); p <- length(coef(Model))
+lev_cut <- 2*p/n
+cook_cut <- 4/n
+
+#Top influential candidates
+sum_influence <- data.frame(
+  id = seq_len(n),
+  fitted = fitted_Model,
+  Leverage = lev_h,
+  rStud = t_stud,
+  CooksD = cookD,
+  flag_lev = lev_h > lev_cut,
+  flag_cook = cookD > cook_cut,
+  flag_large_resid = abs(t_stud) > 3
+)
+#First 10 greatest influenced values by Cook's Distance cutoff
+head(sum_influence[order(-sum_influence$CooksD), ], 10)
+
+#Cook's Distance Plot
+par(mfrow = c(1,2))
+plot(cookD, type="h", main="Cook's Distance", ylab="D", xlab="Obs")
+abline(lev = cook_cut, lty=2)
+
+#Leverage Plot
+plot(lev_h, ylab="Leverage", main="Leverage (hat values)")
+abline(lev_h=lev_cut, lty=2)
+par(mfrow=c(1,1))
+
+#Influence Plot
+influencePlot(Model, 
+              scale = 1,
+              fill = FALSE,
+              #col = c("black", "red"),
+              id.method = "noteworthy",
+              grid = TRUE, 
+              main = "Influence Plot")
+abline(v = lev_cut, lty = 2)
+dev.off #Influence plot flags 5 points
+
+#Try Removing Outliers
+remove_outliers <- function(df) {
+  df %>%
+    mutate(across(where(is.numeric),
+                ~ ifelse(.x < quantile(.x, 0.25, na.rm = TRUE) - 1.5 * IQR(.x) |
+                           .x > quantile(.x, 0.75, na.rm = TRUE) + 1.5 * IQR(.x),
+                         NA, .x)))
+}
+df_clean <- remove_outliers(df) |> 
+  drop_na()
+#Model with removed potential outliers
+clean_Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean)
+#Summary
+summary(clean_Model)
+#Resdiuals and Fitted Values
+res_clean_Model <- resid(clean_Model)
+fitted_clean_Model <- fitted(clean_Model)
+#Residual QQ Plot (Outliers removed)
+qqnorm(res_clean_Model, main = "Normal Q-Q Plot", xlab = "Residuals", ylab = "Sample Quantiles")
+qqline(res_clean_Model, col = "blue", lwd = 2)
+#Residual Plot (Outliers removed)
+plot(fitted_clean_Model, res_clean_Model)
+#Histogram of Residuals (Outliers removed)
+hist(res_clean_Model,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+
+shapiro.test(res_clean_Model)
+bptest(clean_Model)
+# Removal of outliers did not do much to improve the model
+# Satisfaction score became not significant
+# In the next steps we will perform weighted least squares to see if that will 
+#   lessen the effects of the extreme points
+```
+STEP 15: WEIGHTED LEAST SQUARES
+Again we want to see if we can lessen the effect of the extreme values by doing a Weighted Least Squares Regression. Running residual diagnostics on the new model showed that the Shapiro p-value increased signficantly. So we will used the WLS model in our Ridge regression and in the Anova test. 
+```{r}
+#Assign weights
+ols_Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean)
+Weights <- 1 / fitted(ols_Model)^2
+#WLS Model
+wls_Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean, weights = Weights)
+summary(wls_Model)
+#Shapiro-Wilk
+shapiro.test(resid(ols_Model)) 
+shapiro.test(resid(wls_Model))
+#Breusch-Pagan
+bptest(ols_Model) 
+bptest(wls_Model)
+#Check Residual Plots after WLS Correction
+res_wls_Model <- resid(wls_Model)
+fitted_wls_Model <- fitted(wls_Model)
+plot(fitted_wls_Model, res_wls_Model)
+#Histogram of WLS residuals
+hist(res_wls_Model,
+     main = "Histogram of Residuals", 
+     xlab = "Residuals",                    
+     ylab = "Frequency",            
+     border = "black"            
+     )
+#QQ Plot of Residuals
+qqnorm(res_wls_Model, main = "Normal Q-Q Plot after WLS", xlab = "Residuals", ylab = "Sample Quantiles")
+qqline(res_wls_Model, col = "blue", lwd = 2)
+#Check Multicollinearity
+vif(wls_Model)
+# Weighted least squares significantly improved the Shapiro Wilk p-value
+```
+STEP 16: BOOTSTRAPPING
+Summary (step 16 and step 16 cont.): Here we apply bootstrapping so we can see through confidence intervals the effect of the weighted model, and nwo we have the ability to interpret coefficients. The confidence intervals show that Property size as well as the EMI ratio with Manchester were significant, with Property size being the most significant. Since this result appeared in both the OLS and WLS model summary and the WLS bootstrapped CIs, we can confidently say that property size has a statistically significant influence on the price of a house in the UK. Again the bootstrapped confidence intervals are roughly similar to the t-based CIs. Maybe slightly higher showing a slightly stronger estimate, but not by that much. Overall the Weighted Least Squares method did help in reducing issues with normality in this final model.  
+```{r}
+X_M <- model.matrix(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean)
+B <- 1000
+n<- nrow(df_clean)
+p <- length(coef(wls_Model))
+boot_b_wls_Model <- matrix(NA_real_, nrow = B, ncol = p)
+#OLS Bootstrapping
+boot_beta_ols_M <- matrix(NA_real_, nrow = B, ncol = length(coef(ols_Model)))
+for (b in 1:B) {
+  idx <- sample.int(n, n, replace = TRUE)
+  fb <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean[idx,])
+  boot_beta_ols_M[b, ] <- as.numeric(coef(fb)) 
+}
+ci_ols_boot_Model <- t(apply(boot_beta_ols_M, 2, quantile, probs = c(0.025, 0.975)))
+#WLS Bootstrapping
+for (b in 1:B) {
+  idx <- sample.int(n, size = n, replace = TRUE)
+  dat_b <- df_clean[idx, ]
+  
+  ols_b <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = dat_b) #ols model on bootstrapped sample
+  
+  w_b <- 1 / fitted(ols_b)^2 #compute weights
+  wls_b <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = dat_b, weights = w_b)
+  boot_b_wls_Model[b, ] <- as.numeric(coef(wls_b)) #pull all coefficients  
+} 
+  ci_wls_boot_Model <- t(apply(boot_b_wls_Model, 2, quantile, probs = c(0.025, 0.975)))
+```
+STEP 16: CONT.
+```{r}
+#OLS t-based CI
+est_ols_M <- matrix(coef(ols_Model), ncol = 1)
+err_ols_M <- matrix(summary(ols_Model)$coefficients[, c("Std. Error")])
+nu_ols_M <- df.residual(ols_Model)
+tcrit_ols_M <- qt(0.975, df = nu_ols_M)
+ci_ols_t_upper_M <- est_ols_M + tcrit_ols_M * err_ols_M
+ci_ols_t_lower_M <- est_ols_M - tcrit_ols_M *err_ols_M
+ci_ols_t_M <- cbind(ci_ols_t_lower_M, ci_ols_t_upper_M)
+#WLS t-based CI
+est_wls_M <- matrix(coef(wls_Model), ncol = 1) #extract estimate
+err_wls_M <- matrix(summary(wls_Model)$coefficients[, c("Std. Error")]) #extract sd
+nu_wls_M <- df.residual(wls_Model)
+tcrit_wls_M <- qt(0.975, df = nu_ols_M)
+ci_wls_t_upper_M <- est_wls_M + tcrit_wls_M * err_wls_M
+ci_wls_t_lower_M <- est_wls_M - tcrit_wls_M *err_wls_M
+ci_wls_t_M <- cbind(ci_wls_t_lower_M, ci_wls_t_upper_M)
+#OLS Confidence Interval Table with t-based and bootstrapped CIs
+ols_tab_Model <- data.frame(
+  Term <- colnames(X_M),
+  Beta_hat = coef(ols_Model),
+  CI2.5_t <- ci_ols_t_M[,1],
+  CI97.5_t <- ci_ols_t_M[,2],
+  CI2.5 <-  ci_ols_boot_Model[,1],
+  CI97.5 <- ci_ols_boot_Model[,2],
+  row.names = NULL
+)
+ols_tab_Model
+#WLS Confidence Interval Table with t-based and bootstrapped CIs
+wls_tab_Model <- data.frame(
+  Term <- colnames(X_M),
+  Beta_hat = coef(wls_Model),
+  CI2.5_t <- ci_wls_t_M[,1],
+  CI97.5_t <- ci_wls_t_M[,2],
+  CI2.5 <-  ci_wls_boot_Model[,1],
+  CI97.5 <- ci_wls_boot_Model[,2],
+  row.names = NULL
+)
+wls_tab_Model
+# After performing the Bootstrapping technique on the WLS model with the cleaned
+# dataset we get Property size and EMI Ration:Manchester having significant CIs
+```
+STEP 17: RIDGE REGRESSION
+Since this model showed high VIFs we want to run a ridge regression and we use the weighted model since in the previous step it did improve things. 
+```{r}
+X_W <- model.matrix(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean, weights = Weights)
+#Code taken from lecture notes Topic 21 Ridge Regression
+#10-fold cross validations
+cv_ridge_M <- cv.glmnet(X_W, df_clean$price, alpha =0)
+
+lambda_min_M <- cv_ridge$lambda.min
+cat("\n --- Lambda Min --- \n")
+lambda_min_M #find the lambda that minimizes cross-val. error
+
+ridge_fit_M <- glmnet(X_W, df_clean$price, alpha = 0)
+plot(ridge_fit_M, xvar = "lambda", label = TRUE)
+
+cat("\n --- Ridge Coefficients --- \n")
+beta_M <- coef(ridge_fit_M, s = lambda_min)[-2] #Take beta coefficients corresponding to the lambda min value
+#excluding the second entry
+```
+STEP 18: RIDGE REGRESSION BOOTSTRAPPING
+Results from Ridge Regression only show that property-size is significant, which futher confirms that Property size is the best predictor for price of houses in the UK. 
+```{r}
+set.seed(321)
+#Code taken from lecture notes Topic 21 Ridge Regression
+B <- 1000
+p_M <- ncol(X_W)
+boot_b_M <- matrix(NA_real_, nrow = B, ncol = p_M)
+colnames(boot_b_M) <- colnames(X_W)
+
+n <- nrow(X_W)
+for (b in 1:B) {
+  idx <- sample.int(n, size = n, replace = TRUE)
+  fit_b <- glmnet(X_W[idx, ], df_clean$price[idx], alpha = 0,
+                  lambda = lambda_min_M, standardize = FALSE)
+  boot_b_M[b, ] <- as.numeric(coef(fit_b))[-2]
+}
+ci_coef_M <- t(apply(boot_b_M, 2, quantile, probs = c(0.025, 0.975)))
+#Table with bootstrapped confidence interval
+ridge_tab_M <- data.frame(
+  Term = colnames(boot_b_M), 
+  Beta_hat = beta_M,  
+  CI2.5 = ci_coef_M[, 1],
+  CI97.5 = ci_coef_M[,2],
+  row.names = NULL
+)
+cat("\n --- Ridge Regression Table --- \n"); ridge_tab_M
+```
+STEP 19: TEST HYPOTHESIS
+Our final step was running an anova test to truly test our hypothesis using a weighted full model and a weighed model without city interactions as our reduced model. Since our p value is less than 0.05 we can reject the null and can conclude that at least one predictor is significant when also considering city. This makes sense espeically in comparison to the location characteritics model because property size is the best indicator for predicting price intuitively (and through what has been shown here), so becuae it already has a significant effect it would probably be more sensitive to minor changes in the city unlike something that wouldn't predict price well. 
+```{r}
+#Any overall regional effects on the chosen predictors
+full_Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio + 
+             property_size_sqft*factor(city) + satisfaction_score*factor(city) + 
+              emi_to_income_ratio*factor(city), data = df_clean, weights = Weights)
+reduced_Model <- lm(price ~ property_size_sqft + satisfaction_score + emi_to_income_ratio, 
+                    data = df_clean, weights = Weights)
+anova(reduced_Model, full_Model)
+```
